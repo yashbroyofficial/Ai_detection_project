@@ -26,6 +26,7 @@ interface SenderCameraPageProps {
   status: ConnectionStatus;
   session: SessionInfo | null;
   localStream: MediaStream | null;
+  mediaReceived?: boolean;
   peerState: RTCPeerConnectionState | null;
   error: SessionError | null;
   endReason: string | null;
@@ -37,6 +38,7 @@ export function SenderCameraPage({
   status,
   session,
   localStream,
+  mediaReceived,
   peerState,
   endReason,
   onStartCamera,
@@ -90,6 +92,7 @@ export function SenderCameraPage({
   };
 
   const isStreaming = Boolean(localStream);
+  const isLiveConfirmed = status === "connected" && Boolean(mediaReceived);
   const isRequesting = status === "requesting-camera" || isStarting;
   const isEnded = status === "ended";
 
@@ -113,17 +116,34 @@ export function SenderCameraPage({
           /* ACTIVE STREAMING VIEW */
           <div className="w-full max-w-md flex flex-col gap-4">
             {/* Live Indicator Banner */}
-            <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-zinc-900/90 border border-emerald-500/30 backdrop-blur-md shadow-lg shadow-emerald-950/20">
-              <div className="flex items-center gap-2.5">
-                <PulsingRadioIcon />
-                <span className="text-xs font-semibold text-emerald-300 tracking-wide uppercase">
-                  Streaming Live to Laptop
+            {isLiveConfirmed ? (
+              <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-zinc-900/90 border border-emerald-500/30 backdrop-blur-md shadow-lg shadow-emerald-950/20">
+                <div className="flex items-center gap-2.5">
+                  <PulsingRadioIcon />
+                  <span className="text-xs font-semibold text-emerald-300 tracking-wide uppercase">
+                    Streaming Live to Laptop
+                  </span>
+                </div>
+                <span className="text-xs font-mono text-zinc-300">
+                  {formatDuration(streamDuration)}
                 </span>
               </div>
-              <span className="text-xs font-mono text-zinc-300">
-                {formatDuration(streamDuration)}
-              </span>
-            </div>
+            ) : (
+              <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-zinc-900/90 border border-amber-500/30 backdrop-blur-md shadow-lg shadow-amber-950/20">
+                <div className="flex items-center gap-2.5">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-80" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
+                  </span>
+                  <span className="text-xs font-semibold text-amber-300 tracking-wide uppercase">
+                    Connecting to Laptop...
+                  </span>
+                </div>
+                <span className="text-xs font-mono text-zinc-400">
+                  {formatDuration(streamDuration)}
+                </span>
+              </div>
+            )}
 
             {/* Camera Preview Frame */}
             <div className="relative w-full aspect-[3/4] sm:aspect-[9/16] rounded-3xl overflow-hidden bg-zinc-950 border border-white/15 shadow-2xl">

@@ -12,8 +12,13 @@ export class CameraSessionController {
   private listeners = new Set<() => void>();
   private socket: CeovaSocket | null = null;
   private peer: RTCPeerConnection | null = null;
+  private inboundStream: MediaStream | null = null;
+  private inboundReceiver: RTCRtpReceiver | null = null;
   private pendingIce: (RTCIceCandidateInit | null)[] = [];
   private disconnectTimer: number | null = null;
+  private frameMonitor: number | null = null;
+  private frameMonitorStartedAt = 0;
+  private frameCheckRunning = false;
   private actionGeneration = 0;
   private offerStarted = false;
   private disposed = false;
@@ -26,7 +31,7 @@ export class CameraSessionController {
   async createSession(): Promise<SessionInfo> {
     this.assertStartable();
     const generation = ++this.actionGeneration;
-    this.update({ status: "creating", error: null, endReason: null });
+    this.update({ status: "creating", error: null, endReason: null, mediaReceived: false, framesReceived: 0 });
     try {
       const response = await fetch(apiUrl("/api/sessions"), { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       const body = await response.json().catch(() => ({}));
@@ -44,7 +49,7 @@ export class CameraSessionController {
   async joinSession(pairing: PairingCredentials): Promise<void> {
     this.assertStartable();
     const generation = ++this.actionGeneration;
-    this.update({ status: "joining", role: "sender", error: null, endReason: null });
+    this.update({ status: "joining", role: "sender", error: null, endReason: null, mediaReceived: false, framesReceived: 0 });
     try {
       const joined = await this.openAndJoin(pairing, "sender", generation);
       this.update({ status: "waiting", session: { sessionId: joined.sessionId, expiresAt: joined.expiresAt } });
@@ -81,7 +86,7 @@ export class CameraSessionController {
     ++this.actionGeneration;
     const socket = this.socket;
     this.stopMediaAndPeer();
-    this.update({ status: "ended", endReason: "ended", localStream: null, remoteStream: null, peerState: null });
+    this.update({ status: "ended", endReason: "ended", localStream: null, remoteStream: null, mediaReceived: false, framesReceived: 0, peerState: null });
     if (socket?.connected) {
       await emitAck<Record<string, never>>(socket, "session:end", {}).catch(() => undefined);
       socket.removeAllListeners();
@@ -114,6 +119,12 @@ export class CameraSessionController {
     socket.on("signal:offer", (offer: RTCSessionDescriptionInit) => { if (this.snapshot.role === "sender") void this.receiveOffer(offer); });
     socket.on("signal:answer", (answer: RTCSessionDescriptionInit) => { if (this.snapshot.role === "viewer") void this.receiveAnswer(answer); });
     socket.on("signal:ice", (candidate: RTCIceCandidateInit | null) => { void this.receiveIce(candidate); });
+    socket.on("peer:state", ({ state }: { state?: RTCPeerConnectionState }) => {
+      if (this.snapshot.role === "sender" && state === "connected") {
+        this.update({ mediaReceived: true });
+        if (this.peer?.connectionState === "connected") this.update({ status: "connected" });
+      }
+    });
     socket.on("session:ended", ({ reason }: EndPayload) => this.handleEnded(reason));
     socket.on("disconnect", (reason) => {
       if (!this.disposed && this.snapshot.status !== "ended" && reason !== "io client disconnect") this.handleEnded("peer-disconnected");
@@ -125,10 +136,14 @@ export class CameraSessionController {
     const iceServers = this.options.iceServers ?? await this.loadIceServers();
     const peer = new RTCPeerConnection({ iceServers });
     this.peer = peer;
-    peer.onicecandidate = (event) => { if (this.socket?.connected) void emitAck(this.socket, "signal:ice", event.candidate?.toJSON() ?? null).catch((error) => this.fail(error)); };
+    peer.onicecandidate = (event) => { if (this.socket?.connected) void this.sendIce(event.candidate?.toJSON() ?? null); };
     peer.ontrack = (event) => {
-      const stream = event.streams[0] ?? new MediaStream([event.track]);
-      this.update({ remoteStream: stream });
+      this.inboundStream = event.streams[0] ?? new MediaStream([event.track]);
+      this.inboundReceiver = event.receiver;
+      event.track.addEventListener("ended", () => {
+        if (!this.disposed && this.snapshot.status !== "ended") void this.endDueToFailure();
+      }, { once: true });
+      this.startFrameMonitor();
     };
     peer.onconnectionstatechange = () => this.handlePeerState(peer.connectionState);
     return peer;
@@ -181,15 +196,81 @@ export class CameraSessionController {
   private handlePeerState(state: RTCPeerConnectionState) {
     if (this.disposed || this.snapshot.status === "ended" || this.snapshot.status === "error") return;
     this.update({ peerState: state });
-    if (this.socket?.connected) void emitAck(this.socket, "peer:state", { state }).catch(() => undefined);
+    if (this.socket?.connected && (this.snapshot.role !== "viewer" || state !== "connected")) {
+      void emitAck(this.socket, "peer:state", { state }).catch(() => undefined);
+    }
     if (state === "connected") {
       if (this.disconnectTimer) window.clearTimeout(this.disconnectTimer);
       this.disconnectTimer = null;
-      this.update({ status: "connected" });
+      if (this.snapshot.role === "viewer") this.startFrameMonitor();
+      else if (this.snapshot.mediaReceived) this.update({ status: "connected" });
     } else if (state === "disconnected") {
       if (this.disconnectTimer) window.clearTimeout(this.disconnectTimer);
       this.disconnectTimer = window.setTimeout(() => { if (this.peer?.connectionState === "disconnected") void this.endDueToFailure(); }, 10_000);
     } else if (state === "failed" || state === "closed") void this.endDueToFailure();
+  }
+
+  private async sendIce(candidate: RTCIceCandidateInit | null) {
+    const socket = this.socket;
+    if (!socket?.connected) return;
+    try {
+      await emitAck(socket, "signal:ice", candidate);
+    } catch (error) {
+      // Once ICE/DTLS is connected, a delayed signaling acknowledgement must not
+      // tear down an otherwise healthy peer-to-peer media path.
+      if (this.peer?.connectionState !== "connected") this.fail(error);
+    }
+  }
+
+  private startFrameMonitor() {
+    if (this.snapshot.role !== "viewer" || this.frameMonitor !== null
+      || !this.peer || this.peer.connectionState !== "connected"
+      || !this.inboundReceiver || !this.inboundStream) return;
+    this.frameMonitorStartedAt = Date.now();
+    void this.checkInboundFrames();
+    this.frameMonitor = window.setInterval(() => { void this.checkInboundFrames(); }, 250);
+  }
+
+  private async checkInboundFrames() {
+    if (this.frameCheckRunning || !this.inboundReceiver || !this.inboundStream) return;
+    this.frameCheckRunning = true;
+    try {
+      const reports = await this.inboundReceiver.getStats();
+      let frames = 0;
+      let bytes = 0;
+      reports.forEach((report) => {
+        if (report.type !== "inbound-rtp" || (report.kind && report.kind !== "video")) return;
+        frames = Math.max(frames, Number(report.framesDecoded ?? report.framesReceived ?? 0));
+        bytes = Math.max(bytes, Number(report.bytesReceived ?? 0));
+      });
+      if (frames !== this.snapshot.framesReceived) this.update({ framesReceived: frames });
+      const track = this.inboundReceiver.track;
+      const receivedMedia = frames > 0 || (bytes > 0 && !track.muted);
+      if (receivedMedia && track.readyState === "live") {
+        this.stopFrameMonitor();
+        // Publish the stream with the connected state in the same snapshot. The
+        // viewer video element mounts on this transition and can attach it.
+        this.update({ remoteStream: this.inboundStream, mediaReceived: true, framesReceived: Math.max(frames, 1), status: "connected" });
+        if (this.socket?.connected) {
+          void emitAck(this.socket, "peer:state", { state: "connected" }).catch(() => undefined);
+        }
+      } else if (Date.now() - this.frameMonitorStartedAt >= 15_000) {
+        this.stopFrameMonitor();
+        this.fail(new CeovaError("WEBRTC_NO_VIDEO", "The peer connected, but no camera video frames were received."));
+      }
+    } catch {
+      if (Date.now() - this.frameMonitorStartedAt >= 15_000) {
+        this.stopFrameMonitor();
+        this.fail(new CeovaError("WEBRTC_NO_VIDEO", "The peer connected, but video reception could not be confirmed."));
+      }
+    } finally {
+      this.frameCheckRunning = false;
+    }
+  }
+
+  private stopFrameMonitor() {
+    if (this.frameMonitor !== null) window.clearInterval(this.frameMonitor);
+    this.frameMonitor = null;
   }
 
   private async endDueToFailure() {
@@ -201,7 +282,7 @@ export class CameraSessionController {
     if (this.ending || this.snapshot.status === "ended") return;
     ++this.actionGeneration;
     this.cleanupLocal();
-    this.update({ status: "ended", endReason: reason, localStream: null, remoteStream: null, peerState: null });
+    this.update({ status: "ended", endReason: reason, localStream: null, remoteStream: null, mediaReceived: false, framesReceived: 0, peerState: null });
   }
 
   private cleanupLocal() {
@@ -214,10 +295,13 @@ export class CameraSessionController {
   private stopMediaAndPeer() {
     if (this.disconnectTimer) window.clearTimeout(this.disconnectTimer);
     this.disconnectTimer = null;
+    this.stopFrameMonitor();
     this.snapshot.localStream?.getTracks().forEach((track) => track.stop());
     this.snapshot.remoteStream?.getTracks().forEach((track) => track.stop());
     this.peer?.close();
     this.peer = null;
+    this.inboundStream = null;
+    this.inboundReceiver = null;
     this.pendingIce = [];
   }
 
@@ -248,7 +332,7 @@ export class CameraSessionController {
   private fail(error: unknown) {
     const resolved = asCeovaError(error);
     this.cleanupLocal();
-    this.update({ status: "error", error: { code: resolved.code, message: resolved.message }, localStream: null, remoteStream: null, peerState: null });
+    this.update({ status: "error", error: { code: resolved.code, message: resolved.message }, localStream: null, remoteStream: null, mediaReceived: false, framesReceived: 0, peerState: null });
     return resolved;
   }
 

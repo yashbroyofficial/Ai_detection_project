@@ -27,6 +27,8 @@ interface ViewerDashboardProps {
   onCreateSession: () => Promise<void>;
   onEndSession: () => Promise<void>;
   onClearError: () => void;
+  isCreating?: boolean;
+  onReturnHome?: () => void;
 }
 
 export function ViewerDashboard({
@@ -37,6 +39,8 @@ export function ViewerDashboard({
   endReason,
   onCreateSession,
   onEndSession,
+  isCreating: isCreatingProp,
+  onReturnHome,
 }: ViewerDashboardProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrError, setQrError] = useState<string | null>(null);
@@ -143,7 +147,7 @@ export function ViewerDashboard({
   };
 
   // Determine which sub-view to show:
-  const isCreating = status === "creating";
+  const isCreating = Boolean(isCreatingProp) || status === "creating";
   const isWaiting = status === "waiting" && Boolean(session);
   const isConnecting = status === "connecting";
   const isConnected = status === "connected";
@@ -420,14 +424,37 @@ export function ViewerDashboard({
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={onCreateSession}
-              className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-semibold text-black bg-white hover:bg-zinc-200 transition-all shadow-lg active:scale-95"
-            >
-              <SparklesIcon className="w-4 h-4" />
-              <span>Create New Session</span>
-            </button>
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              <button
+                type="button"
+                onClick={onCreateSession}
+                disabled={isCreating}
+                className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl text-sm font-semibold text-black bg-white hover:bg-zinc-200 transition-all shadow-lg active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isCreating ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                    <span>Creating Session...</span>
+                  </>
+                ) : (
+                  <>
+                    <SparklesIcon className="w-4 h-4" />
+                    <span>Create New Session</span>
+                  </>
+                )}
+              </button>
+
+              {onReturnHome && (
+                <button
+                  type="button"
+                  onClick={onReturnHome}
+                  disabled={isCreating}
+                  className="px-5 py-3 rounded-2xl text-xs font-medium text-zinc-400 hover:text-white hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50"
+                >
+                  Return to Home
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           /* VIEW 5: IDLE HERO DASHBOARD */

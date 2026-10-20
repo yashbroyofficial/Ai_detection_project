@@ -19,7 +19,7 @@ export function createSocket() {
 export async function connectSocket(socket: CeovaSocket) {
   if (socket.connected) return;
   await new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(() => done(new CeovaError("ACK_TIMEOUT", "The signaling server did not respond.")), 8_000);
+    const timer = window.setTimeout(() => done(new CeovaError("NETWORK_ERROR", "Timed out connecting to the signaling server.")), 8_000);
     const done = (error?: Error) => {
       window.clearTimeout(timer);
       socket.off("connect", onConnect);
@@ -36,7 +36,7 @@ export async function connectSocket(socket: CeovaSocket) {
 
 export async function emitAck<T>(socket: CeovaSocket, event: string, payload: unknown): Promise<T> {
   const response = await socket.timeout(8_000).emitWithAck(event, payload).catch((error) => {
-    throw new CeovaError("ACK_TIMEOUT", "The signaling server did not respond.", { cause: error });
+    throw new CeovaError("ACK_TIMEOUT", `The signaling server did not acknowledge ${event} within 8 seconds.`, { cause: error });
   }) as Ack<T>;
   if (!response?.ok) throw new CeovaError(response?.error?.code ?? "NETWORK_ERROR", response?.error?.message ?? "The signaling request failed.");
   return response.data;

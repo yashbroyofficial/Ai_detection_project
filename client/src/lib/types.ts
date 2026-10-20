@@ -12,6 +12,8 @@ export type SessionSnapshot = {
   session: SessionInfo | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  mediaReceived: boolean;
+  framesReceived: number;
   peerState: RTCPeerConnectionState | null;
   error: SessionError | null;
   endReason: string | null;
@@ -20,5 +22,6 @@ export type ControllerOptions = { iceServers?: RTCIceServer[] };
 
 export const initialSnapshot: SessionSnapshot = {
   status: "idle", role: null, session: null, localStream: null,
-  remoteStream: null, peerState: null, error: null, endReason: null,
+  remoteStream: null, mediaReceived: false, framesReceived: 0,
+  peerState: null, error: null, endReason: null,
 };

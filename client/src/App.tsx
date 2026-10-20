@@ -11,66 +11,137 @@ import { ViewerDashboard } from "./pages/ViewerDashboard";
 import { SenderCameraPage } from "./pages/SenderCameraPage";
 import "./App.css";
 
-export default function App() {
+interface ViewerAppContainerProps {
+  onRestartSession: (createImmediately?: boolean) => void;
+  autoCreate?: boolean;
+}
+
+function ViewerAppContainer({
+  onRestartSession,
+  autoCreate = false,
+}: ViewerAppContainerProps) {
   const session = useCameraSession();
-  const [localError, setLocalError] = useState<SessionError | null>(null);
-  const [pairingCredentials, setPairingCredentials] = useState<PairingCredentials | null>(null);
-  const [isCameraRoute, setIsCameraRoute] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return (
-      window.location.pathname.startsWith("/camera") ||
-      window.location.hash.includes("session=")
-    );
-  });
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const autoCreatedRef = useRef(false);
 
-  const joinedRef = useRef(false);
-
-  // Check route and parse camera pairing credentials if on /camera
+  // If autoCreate was requested (e.g. from "Create New Session" button),
+  // trigger session creation once the fresh controller mounts in "idle" state
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const onCameraRoute =
-      window.location.pathname.startsWith("/camera") ||
-      window.location.hash.includes("session=");
-
-    setIsCameraRoute(onCameraRoute);
-
-    if (onCameraRoute) {
-      try {
-        const creds = parseCameraLink(window.location.href);
-        setPairingCredentials(creds);
-        // Strip sensitive fragment credentials from address bar to prevent history leaking
-        window.history.replaceState(null, "", window.location.pathname);
-      } catch (err: unknown) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : "The camera link is invalid or incomplete.";
-        setLocalError({
-          code: "INVALID_REQUEST",
-          message,
-        });
-      }
-    }
-  }, []);
-
-  // Join session as sender once pairing credentials are parsed
-  useEffect(() => {
-    if (isCameraRoute && pairingCredentials && !joinedRef.current) {
-      joinedRef.current = true;
-      session.joinSession(pairingCredentials).catch(() => {
-        // Error will be populated in session.error by the controller
+    if (autoCreate && !autoCreatedRef.current && session.status === "idle") {
+      autoCreatedRef.current = true;
+      setIsCreatingSession(true);
+      session.createSession().finally(() => {
+        setIsCreatingSession(false);
       });
     }
-  }, [isCameraRoute, pairingCredentials, session]);
+  }, [autoCreate, session]);
 
   const handleCreateSession = async () => {
+    // If the controller has ended or errored, it cannot be restarted in-place
+    // per client/src/lib/controller.ts assertStartable(). Request a fresh controller.
+    if (session.status === "ended" || session.status === "error") {
+      onRestartSession(true);
+      return;
+    }
+    if (isCreatingSession || session.status === "creating") return;
+    setIsCreatingSession(true);
     try {
       await session.createSession();
     } catch {
-      // Error is stored in session.error
+      // Error is populated in session.error by the controller
+    } finally {
+      setIsCreatingSession(false);
     }
   };
+
+  const handleEndSession = async () => {
+    try {
+      await session.endSession();
+    } catch {
+      // Handled
+    }
+  };
+
+  const handleReturnHome = () => {
+    onRestartSession(false);
+  };
+
+  const isCreating = isCreatingSession || session.status === "creating";
+
+  return (
+    <div className="flex flex-col min-h-screen">
+      <Navbar
+        status={session.status}
+        peerState={session.peerState}
+        onEndSession={handleEndSession}
+        showEndButton={
+          session.status === "waiting" ||
+          session.status === "connecting" ||
+          session.status === "connected"
+        }
+      />
+      <main className="flex-1">
+        <ViewerDashboard
+          status={session.status}
+          session={session.session}
+          remoteStream={session.remoteStream}
+          peerState={session.peerState}
+          error={session.error}
+          endReason={session.endReason}
+          isCreating={isCreating}
+          onCreateSession={handleCreateSession}
+          onEndSession={handleEndSession}
+          onClearError={session.clearError}
+          onReturnHome={handleReturnHome}
+        />
+      </main>
+
+      {/* Global Error Modal for Viewer */}
+      <ErrorModal
+        error={session.error}
+        onClear={session.clearError}
+        onRetry={() => {
+          session.clearError();
+          onRestartSession(true);
+        }}
+        retryLabel="Create New Session"
+      />
+    </div>
+  );
+}
+
+function SenderAppContainer() {
+  const session = useCameraSession();
+  const [localError, setLocalError] = useState<SessionError | null>(null);
+  const [pairingCredentials, setPairingCredentials] = useState<PairingCredentials | null>(null);
+  const joinedRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const creds = parseCameraLink(window.location.href);
+      setPairingCredentials(creds);
+      window.history.replaceState(null, "", window.location.pathname);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "The camera link is invalid or incomplete.";
+      setLocalError({
+        code: "INVALID_REQUEST",
+        message,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (pairingCredentials && !joinedRef.current) {
+      joinedRef.current = true;
+      session.joinSession(pairingCredentials).catch(() => {
+        // Handled in session.error
+      });
+    }
+  }, [pairingCredentials, session]);
 
   const handleEndSession = async () => {
     try {
@@ -88,57 +159,54 @@ export default function App() {
   const activeError = localError ?? session.error;
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-[#f4f4f6] selection:bg-white/20 selection:text-white">
-      {/* Route Switch */}
-      {isCameraRoute ? (
-        <SenderCameraPage
-          status={session.status}
-          session={session.session}
-          localStream={session.localStream}
-          peerState={session.peerState}
-          error={activeError}
-          endReason={session.endReason}
-          onStartCamera={session.startCamera}
-          onEndSession={handleEndSession}
-        />
-      ) : (
-        <div className="flex flex-col min-h-screen">
-          <Navbar
-            status={session.status}
-            peerState={session.peerState}
-            onEndSession={handleEndSession}
-            showEndButton={session.status === "waiting" || session.status === "connecting" || session.status === "connected"}
-          />
-          <main className="flex-1">
-            <ViewerDashboard
-              status={session.status}
-              session={session.session}
-              remoteStream={session.remoteStream}
-              peerState={session.peerState}
-              error={activeError}
-              endReason={session.endReason}
-              onCreateSession={handleCreateSession}
-              onEndSession={handleEndSession}
-              onClearError={handleClearError}
-            />
-          </main>
-        </div>
-      )}
-
-      {/* Global Error Modal */}
+    <>
+      <SenderCameraPage
+        status={session.status}
+        session={session.session}
+        localStream={session.localStream}
+        mediaReceived={session.mediaReceived}
+        peerState={session.peerState}
+        error={activeError}
+        endReason={session.endReason}
+        onStartCamera={session.startCamera}
+        onEndSession={handleEndSession}
+      />
       <ErrorModal
         error={activeError}
         onClear={handleClearError}
-        onRetry={
-          isCameraRoute
-            ? undefined
-            : () => {
-                handleClearError();
-                void handleCreateSession();
-              }
-        }
-        retryLabel={isCameraRoute ? "Dismiss" : "Create New Session"}
       />
+    </>
+  );
+}
+
+export default function App() {
+  const [sessionKey, setSessionKey] = useState(0);
+  const [autoCreateOnMount, setAutoCreateOnMount] = useState(false);
+
+  const [isCameraRoute] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      window.location.pathname.startsWith("/camera") ||
+      window.location.hash.includes("session=")
+    );
+  });
+
+  const handleRestartSession = (createImmediately: boolean = false) => {
+    setAutoCreateOnMount(createImmediately);
+    setSessionKey((prev) => prev + 1);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#09090b] text-[#f4f4f6] selection:bg-white/20 selection:text-white">
+      {isCameraRoute ? (
+        <SenderAppContainer />
+      ) : (
+        <ViewerAppContainer
+          key={sessionKey}
+          onRestartSession={handleRestartSession}
+          autoCreate={autoCreateOnMount}
+        />
+      )}
     </div>
   );
 }

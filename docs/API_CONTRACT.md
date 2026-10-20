@@ -81,7 +81,7 @@ Do not implement these events in UI code.
 | --- | --- |
 | `peer:ready` | `{}`; both peers are present and camera is ready |
 | `signal:offer`, `signal:answer`, `signal:ice` | Validated other peer's payload |
-| `peer:state` | `{ state }`; reported by other peer, informational |
+| `peer:state` | `{ state }`; viewer reports `connected` after inbound video is confirmed |
 | `session:ended` | `{ reason: "ended" \| "peer-disconnected" \| "expired" \| "server-shutdown" }` |
 
 Signaling messages are routed only to the other member of the authenticated
@@ -129,6 +129,8 @@ type SessionSnapshot = {
   session: SessionInfo | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  mediaReceived: boolean; // viewer has confirmed inbound video frames
+  framesReceived: number; // latest inbound video frame count
   peerState: RTCPeerConnectionState | null;
   error: { code: string; message: string } | null;
   endReason: string | null;
@@ -165,7 +167,7 @@ Representative errors: `INVALID_REQUEST`, `SESSION_UNAVAILABLE`,
 `PEER_NOT_READY`, `INVALID_SIGNAL`, `RATE_LIMITED`, `PUBLIC_ORIGIN_REQUIRED`,
 `NETWORK_ERROR`, `ACK_TIMEOUT`, `INSECURE_CONTEXT`, `CAMERA_DENIED`,
 `CAMERA_NOT_FOUND`, `CAMERA_BUSY`, `CAMERA_ERROR`, `WEBRTC_ERROR`,
-`INVALID_STATE`, `CANCELLED`.
+`WEBRTC_NO_VIDEO`, `INVALID_STATE`, `CANCELLED`.
 
 Permission denial or device failure ends the reserved session and stops any
 tracks; create a new pairing to try again. A transient WebRTC `disconnected`
