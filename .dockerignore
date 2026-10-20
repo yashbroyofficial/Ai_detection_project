@@ -1,0 +1,28 @@
+.git
+.github
+.vercel
+
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+**/coverage
+
+.env
+.env.*
+certs
+**/certs
+*.pem
+*.key
+*.p12
+*.pfx
+
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# The backend image is built from server sources. The client manifest is kept
+# because npm uses it to validate the root workspace lockfile.
+client/src
+client/public

@@ -1,5 +1,10 @@
 # CEOVA production deployment
 
+The current requested backend target is Back4app Containers. Follow
+`docs/BACK4APP_DEPLOYMENT.md` for the Docker-based free-plan setup. The Render
+material below is retained as a deployment reference; `render.yaml` has not been
+removed.
+
 This guide deploys the existing Vite frontend to Vercel and the Express plus
 Socket.IO signaling server to Render. Vercel and Render provide trusted HTTPS;
 the files under local `certs/` are never uploaded or configured in production.
