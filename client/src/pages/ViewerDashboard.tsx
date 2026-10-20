@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import type { ConnectionStatus, SessionError, SessionInfo } from "../lib";
-import { createQrDataUrl } from "../lib";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ConnectionStatus, HumanPresenceAlert, SessionError, SessionInfo } from "../lib";
+import { createQrDataUrl, useHumanDetection } from "../lib";
 import { ConnectionBadge } from "../components/ConnectionBadge";
+import { DetectionOverlay } from "../components/DetectionOverlay";
+import { DetectionStatsWidget } from "../components/DetectionStatsWidget";
+import { DetectionAlertToast } from "../components/DetectionAlertToast";
+import { audioAlertService } from "../components/audioAlert";
 import {
   ArrowRightIcon,
+  BrainIcon,
   CheckIcon,
   CopyIcon,
   LaptopIcon,
@@ -13,6 +18,8 @@ import {
   SmartphoneIcon,
   SparklesIcon,
   VideoIcon,
+  Volume2Icon,
+  VolumeXIcon,
 } from "../components/Icons";
 import { SessionExpiryTimer } from "../components/SessionExpiryTimer";
 import { VideoControls } from "../components/VideoControls";
@@ -21,6 +28,7 @@ interface ViewerDashboardProps {
   status: ConnectionStatus;
   session: SessionInfo | null;
   remoteStream: MediaStream | null;
+  mediaReceived?: boolean;
   peerState: RTCPeerConnectionState | null;
   error: SessionError | null;
   endReason: string | null;
@@ -35,6 +43,7 @@ export function ViewerDashboard({
   status,
   session,
   remoteStream,
+  mediaReceived,
   peerState,
   endReason,
   onCreateSession,
@@ -51,8 +60,93 @@ export function ViewerDashboard({
   const [streamResolution, setStreamResolution] = useState<{ width: number; height: number } | null>(null);
   const [liveDuration, setLiveDuration] = useState(0);
 
+  // Human Detection Integration from Codex contract
+  const detection = useHumanDetection({
+    confidenceThreshold: 0.60,
+    inferenceFps: 5,
+    confirmationFrames: 2,
+    absenceFrames: 3,
+    alertCooldownMs: 10_000,
+  });
+
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [soundAlertsEnabled, setSoundAlertsEnabled] = useState(false);
+  const [activeAlert, setActiveAlert] = useState<HumanPresenceAlert | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Detection lifecycle management: attach only when video & confirmed inbound frames are present
+  useEffect(() => {
+    const video = videoRef.current;
+    const isStreamReady =
+      status === "connected" &&
+      Boolean(mediaReceived) &&
+      Boolean(remoteStream) &&
+      Boolean(video);
+
+    if (!aiEnabled || !isStreamReady || !video) {
+      detection.stopDetection();
+      return;
+    }
+
+    void detection.startDetection(video);
+
+    return () => {
+      detection.stopDetection();
+    };
+  }, [aiEnabled, status, mediaReceived, remoteStream]);
+
+  // Listen for stabilized human presence alerts from Codex engine
+  useEffect(() => {
+    const unsubscribe = detection.onHumanPresenceAlert((alert) => {
+      setActiveAlert(alert);
+      if (soundAlertsEnabled) {
+        audioAlertService.playAlert();
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [detection.onHumanPresenceAlert, soundAlertsEnabled]);
+
+  const handleToggleAi = () => {
+    setAiEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        detection.stopDetection();
+        setActiveAlert(null);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSound = () => {
+    setSoundAlertsEnabled((prev) => {
+      const next = !prev;
+      audioAlertService.setEnabled(next);
+      return next;
+    });
+  };
+
+  const handleDismissAlert = useCallback(() => {
+    setActiveAlert(null);
+  }, []);
+
+  const handleEndStreamWithAiCleanup = async () => {
+    detection.stopDetection();
+    setAiEnabled(false);
+    setActiveAlert(null);
+    await onEndSession();
+  };
+
+  const handleRetryDetection = () => {
+    detection.clearDetectionError();
+    const video = videoRef.current;
+    if (video) {
+      void detection.startDetection(video);
+    }
+  };
 
   // Generate QR code whenever session.joinUrl is available
   useEffect(() => {
@@ -158,7 +252,7 @@ export function ViewerDashboard({
       <div className="max-w-6xl mx-auto w-full">
         {/* VIEW 1: CONNECTED / LIVE STREAM VIEWER */}
         {isConnected ? (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
             {/* Live Video Top Bar */}
             <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-zinc-900/90 border border-white/10 backdrop-blur-md">
               <div className="flex items-center gap-3">
@@ -176,7 +270,71 @@ export function ViewerDashboard({
                 )}
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* AI Detection Toggle Control */}
+                <button
+                  type="button"
+                  onClick={handleToggleAi}
+                  className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all active:scale-95 cursor-pointer ${
+                    !aiEnabled
+                      ? "text-zinc-200 bg-zinc-800 hover:bg-zinc-700 border-white/10"
+                      : detection.status === "loading"
+                      ? "text-amber-300 bg-amber-500/15 border-amber-500/40"
+                      : detection.status === "error"
+                      ? "text-rose-300 bg-rose-500/15 border-rose-500/30"
+                      : "text-emerald-300 bg-emerald-500/20 border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
+                  }`}
+                  title={aiEnabled ? "Disable AI Detection" : "Enable AI Detection on camera feed"}
+                >
+                  {aiEnabled && detection.status === "loading" ? (
+                    <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <BrainIcon
+                      className={`w-4 h-4 ${
+                        aiEnabled && (detection.status === "running" || detection.status === "ready")
+                          ? "text-emerald-400 animate-pulse"
+                          : "text-sky-400"
+                      }`}
+                    />
+                  )}
+                  <span>
+                    {!aiEnabled
+                      ? "Enable AI Detection"
+                      : detection.status === "loading"
+                      ? "Loading AI Model..."
+                      : detection.status === "error"
+                      ? "AI Error (Reset)"
+                      : "AI Detection Active"}
+                  </span>
+                </button>
+
+                {/* Optional Sound Alerts Toggle */}
+                {aiEnabled && (
+                  <button
+                    type="button"
+                    onClick={handleToggleSound}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
+                      soundAlertsEnabled
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30 shadow-sm"
+                        : "bg-zinc-800 text-zinc-400 border-zinc-700/60 hover:text-white"
+                    }`}
+                    title={
+                      soundAlertsEnabled
+                        ? "Sound Alerts: ON (Click to mute)"
+                        : "Sound Alerts: OFF (Click to enable audio chime on human detection)"
+                    }
+                  >
+                    {soundAlertsEnabled ? (
+                      <Volume2Icon className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <VolumeXIcon className="w-4 h-4 text-zinc-400" />
+                    )}
+                    <span className="hidden md:inline">
+                      Sound: {soundAlertsEnabled ? "ON" : "OFF"}
+                    </span>
+                  </button>
+                )}
+
                 <VideoControls
                   videoRef={videoRef}
                   containerRef={videoContainerRef}
@@ -188,13 +346,27 @@ export function ViewerDashboard({
 
                 <button
                   type="button"
-                  onClick={onEndSession}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-medium text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-all active:scale-95"
+                  onClick={handleEndStreamWithAiCleanup}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-medium text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-all active:scale-95 cursor-pointer"
                 >
                   End Stream
                 </button>
               </div>
             </div>
+
+            {/* Live Detection Statistics Widget */}
+            {aiEnabled && (
+              <DetectionStatsWidget
+                enabled={aiEnabled}
+                status={detection.status}
+                peopleCount={detection.peopleCount}
+                humanPresent={detection.humanPresent}
+                lastDetectionTime={detection.lastDetectionTime}
+                error={detection.error}
+                onRetry={handleRetryDetection}
+                confidenceThreshold={detection.confidenceThreshold}
+              />
+            )}
 
             {/* Video Viewport Frame */}
             <div
@@ -215,6 +387,16 @@ export function ViewerDashboard({
                 className={`w-full h-full transition-transform duration-200 ${
                   objectFit === "contain" ? "object-contain" : "object-cover"
                 } ${isMirrored ? "-scale-x-100" : ""}`}
+              />
+
+              {/* Real-time Bounding Box Overlay */}
+              <DetectionOverlay
+                detections={detection.detections}
+                videoRef={videoRef}
+                containerRef={videoContainerRef}
+                objectFit={objectFit}
+                isMirrored={isMirrored}
+                enabled={aiEnabled && (detection.status === "running" || detection.status === "ready")}
               />
 
               {/* Autoplay Blocked Overlay */}
@@ -543,6 +725,14 @@ export function ViewerDashboard({
         <p>CEOVA Camera Bridge • Direct LAN/WAN WebRTC</p>
         <p>Permissions are requested transparently on the sender device.</p>
       </footer>
+
+      {/* Stabilized Detection Alert Notification */}
+      {aiEnabled && (
+        <DetectionAlertToast
+          alert={activeAlert}
+          onDismiss={handleDismissAlert}
+        />
+      )}
     </div>
   );
 }

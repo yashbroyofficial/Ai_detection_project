@@ -85,6 +85,7 @@ function ViewerAppContainer({
           status={session.status}
           session={session.session}
           remoteStream={session.remoteStream}
+          mediaReceived={session.mediaReceived}
           peerState={session.peerState}
           error={session.error}
           endReason={session.endReason}
