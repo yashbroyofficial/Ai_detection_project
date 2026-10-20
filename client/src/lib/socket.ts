@@ -5,6 +5,14 @@ import { getBackendOrigin } from "./endpoint";
 export type CeovaSocket = Socket;
 type Ack<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
 
+function signalingDisconnected(event: string, reason?: string) {
+  const suffix = reason ? ` (${reason})` : "";
+  return new CeovaError(
+    "SIGNALING_DISCONNECTED",
+    `The signaling connection closed before ${event} was acknowledged${suffix}. Create a fresh session and try again.`,
+  );
+}
+
 export function createSocket() {
   const options: Partial<ManagerOptions & SocketOptions> = {
     path: "/socket.io",
@@ -13,7 +21,17 @@ export function createSocket() {
     transports: ["websocket", "polling"],
   };
   const backendOrigin = getBackendOrigin();
-  return backendOrigin ? io(backendOrigin, options) : io(options);
+  const socket = backendOrigin ? io(backendOrigin, options) : io(options);
+  socket.on("connect", () => {
+    console.info(`[CEOVA signaling] connected transport=${socket.io.engine.transport.name}`);
+  });
+  socket.on("disconnect", (reason) => {
+    if (reason !== "io client disconnect") console.warn(`[CEOVA signaling] disconnected reason=${reason}`);
+  });
+  socket.on("connect_error", () => {
+    console.warn("[CEOVA signaling] connection failed");
+  });
+  return socket;
 }
 
 export async function connectSocket(socket: CeovaSocket) {
@@ -35,9 +53,26 @@ export async function connectSocket(socket: CeovaSocket) {
 }
 
 export async function emitAck<T>(socket: CeovaSocket, event: string, payload: unknown): Promise<T> {
-  const response = await socket.timeout(8_000).emitWithAck(event, payload).catch((error) => {
-    throw new CeovaError("ACK_TIMEOUT", `The signaling server did not acknowledge ${event} within 8 seconds.`, { cause: error });
-  }) as Ack<T>;
+  if (!socket.connected) throw signalingDisconnected(event);
+  const response = await new Promise<Ack<T>>((resolve, reject) => {
+    let settled = false;
+    const finish = (result: Ack<T> | CeovaError, failed = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off("disconnect", onDisconnect);
+      failed ? reject(result) : resolve(result as Ack<T>);
+    };
+    const onDisconnect = (reason: string) => finish(signalingDisconnected(event, reason), true);
+    const timer = setTimeout(() => {
+      finish(new CeovaError(
+        "ACK_TIMEOUT",
+        `The signaling transport remained connected, but the server did not acknowledge ${event} within 8 seconds.`,
+      ), true);
+    }, 8_000);
+    socket.once("disconnect", onDisconnect);
+    socket.emit(event, payload, (result: Ack<T>) => finish(result));
+  });
   if (!response?.ok) throw new CeovaError(response?.error?.code ?? "NETWORK_ERROR", response?.error?.message ?? "The signaling request failed.");
   return response.data;
 }

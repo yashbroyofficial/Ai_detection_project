@@ -6,10 +6,23 @@ import { SessionStore } from "./sessions.js";
 type Ack<T = Record<string, never>> = (result: { ok: true; data: T } | { ok: false; error: ReturnType<typeof errorPayload> }) => void;
 const peerStates = new Set(["new", "connecting", "connected", "disconnected", "failed", "closed"]);
 
-function safeAck<T>(ack: unknown, work: () => T): void {
-  if (typeof ack !== "function") return;
-  try { (ack as Ack<T>)({ ok: true, data: work() }); }
-  catch (error) { (ack as Ack<T>)({ ok: false, error: errorPayload(error) }); }
+function safeAck<T>(ack: unknown, work: () => T, event?: string): void {
+  if (typeof ack !== "function") {
+    if (event) console.warn(`[CEOVA signaling] received ${event} without an acknowledgement callback`);
+    return;
+  }
+  let result: Parameters<Ack<T>>[0];
+  try {
+    result = { ok: true, data: work() };
+  } catch (error) {
+    const payload = errorPayload(error);
+    result = { ok: false, error: payload };
+  }
+  (ack as Ack<T>)(result);
+  if (event) {
+    const outcome = result.ok ? "accepted" : `rejected code=${result.error.code}`;
+    console.info(`[CEOVA signaling] acknowledged ${event} outcome=${outcome}`);
+  }
 }
 
 function peerId(session: Session, role: Role) {
@@ -70,7 +83,7 @@ export function attachSignaling(io: Server, store: SessionStore) {
       socket.join(session.id);
       if (session.ready && session.viewer && session.sender) io.to(session.id).emit("peer:ready", {});
       return { sessionId: session.id, role, expiresAt: session.expiresAt };
-    }));
+    }, "session:join"));
 
     socket.on("sender:ready", (_payload, ack) => safeAck(ack, () => {
       guard();

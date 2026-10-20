@@ -43,13 +43,28 @@ test("HTTP creation and authenticated signaling complete then invalidate the ses
     assert.ok(senderToken);
 
     const makeSocket = () => {
-      const socket = connect(base, { forceNew: true, reconnection: false, extraHeaders: { Origin: origin } });
+      const socket = connect(base, {
+        forceNew: true,
+        reconnection: false,
+        transports: ["websocket"],
+        extraHeaders: { Origin: origin },
+      });
       sockets.push(socket);
       return socket;
     };
     const viewer = makeSocket();
     const sender = makeSocket();
     await Promise.all([once(viewer, "connect"), once(sender, "connect")]);
+    const invalidJoin = await ack(sender, "session:join", { sessionId: created.body.sessionId, token: "invalid", role: "sender" });
+    assert.equal(invalidJoin.ok, false);
+    assert.equal(invalidJoin.error?.code, "INVALID_REQUEST");
+    const invalidToken = await ack(sender, "session:join", {
+      sessionId: created.body.sessionId,
+      token: "A".repeat(43),
+      role: "sender",
+    });
+    assert.equal(invalidToken.ok, false);
+    assert.equal(invalidToken.error?.code, "INVALID_TOKEN");
     assert.equal((await ack(viewer, "session:join", { sessionId: created.body.sessionId, token: created.body.viewerToken, role: "viewer" })).ok, true);
     assert.equal((await ack(sender, "session:join", { sessionId: created.body.sessionId, token: senderToken, role: "sender" })).ok, true);
 
@@ -69,6 +84,32 @@ test("HTTP creation and authenticated signaling complete then invalidate the ses
     assert.equal((await ack(viewer, "session:end", {})).ok, true);
     assert.deepEqual(await ended, { reason: "ended" });
     await request(instance.app).get(`/api/sessions/${created.body.sessionId}`).expect(404);
+
+    const expiredJoin = await ack(sender, "session:join", {
+      sessionId: created.body.sessionId,
+      token: senderToken,
+      role: "sender",
+    });
+    assert.equal(expiredJoin.ok, false);
+    assert.equal(expiredJoin.error?.code, "SESSION_UNAVAILABLE");
+
+    const fresh = await request(instance.app).post("/api/sessions").send({}).expect(201);
+    const freshSenderToken = new URLSearchParams(new URL(fresh.body.joinUrl).hash.slice(1)).get("token");
+    assert.ok(freshSenderToken);
+    const freshViewer = makeSocket();
+    const freshSender = makeSocket();
+    await Promise.all([once(freshViewer, "connect"), once(freshSender, "connect")]);
+    assert.equal((await ack(freshViewer, "session:join", {
+      sessionId: fresh.body.sessionId,
+      token: fresh.body.viewerToken,
+      role: "viewer",
+    })).ok, true);
+    assert.equal((await ack(freshSender, "session:join", {
+      sessionId: fresh.body.sessionId,
+      token: freshSenderToken,
+      role: "sender",
+    })).ok, true);
+    assert.equal((await ack(freshViewer, "session:end", {})).ok, true);
   } finally {
     sockets.forEach((socket) => socket.disconnect());
     await instance.close();
