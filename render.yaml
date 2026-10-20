@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ceova-signaling
+    runtime: node
+    buildCommand: npm ci && npm run build -w server
+    startCommand: npm run start -w server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PUBLIC_ORIGIN
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: STUN_URLS
+        value: stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+      - key: MAX_SESSIONS
+        value: 500
